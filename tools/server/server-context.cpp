@@ -3009,6 +3009,28 @@ private:
         int32_t n_batch  = llama_n_batch(ctx_tgt);
         int32_t n_ubatch = llama_n_ubatch(ctx_tgt);
 
+        // A large prompt prefill can otherwise occupy a full forward pass and make
+        // already-generating slots effectively stall. When generation is active,
+        // limit only the prompt-token portion of this scheduler update. Generation
+        // and speculative tokens already present in `batch` do not consume this budget.
+        const bool has_active_generation = !generating.empty();
+        const int32_t prefill_budget =
+            has_active_generation && params_base.prefill_chunk_size > 0
+                ? std::min(n_batch, params_base.prefill_chunk_size)
+                : n_batch;
+        int32_t prefill_tokens_added = 0;
+
+        int32_t prompt_slots_remaining = 0;
+        if (has_active_generation && params_base.prefill_chunk_size > 0) {
+            iterate(slots, [&](server_slot & slot) {
+                if (slot.is_processing() &&
+                    (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) &&
+                    slot.can_split()) {
+                    prompt_slots_remaining++;
+                }
+            });
+        }
+
         auto & alora_scale       = batch.alora_scale;
         auto & alora_disabled_id = batch.alora_disabled_id;
 
@@ -3039,6 +3061,23 @@ private:
                 // this slot still has a prompt to be processed
                 if (slot.state == SLOT_STATE_PROCESSING_PROMPT || slot.state == SLOT_STATE_STARTED) {
                     const auto & input_tokens = slot.task->tokens;
+
+                    const bool limit_prefill =
+                        has_active_generation && params_base.prefill_chunk_size > 0 && slot.can_split();
+
+                    // Divide the remaining aggregate prompt budget among remaining
+                    // splittable prompt slots. This prevents the first long prompt
+                    // from consuming the entire allowance while keeping a hard
+                    // aggregate cap across the scheduler update.
+                    int32_t slot_prefill_budget = n_batch;
+                    if (limit_prefill) {
+                        const int32_t budget_remaining = std::max(0, prefill_budget - prefill_tokens_added);
+                        if (budget_remaining == 0) {
+                            return;
+                        }
+                        slot_prefill_budget = std::max(1,
+                            budget_remaining / std::max(1, prompt_slots_remaining));
+                    }
 
                     // used to determine the number of tokens added to the batch for the current slot
                     const auto n_tokens_prev = batch.size();
@@ -3449,7 +3488,12 @@ private:
                     const auto last_user_pos = spans.last_user_message_pos();
 
                     // add prompt tokens for processing in the current batch
-                    while (slot.prompt.n_tokens() < slot.task->n_tokens() && batch.size() < n_batch) {
+                    int32_t slot_prefill_tokens_added = 0;
+                    while (slot.prompt.n_tokens() < slot.task->n_tokens() &&
+                           batch.size() < n_batch &&
+                           (!limit_prefill ||
+                            (prefill_tokens_added < prefill_budget &&
+                             slot_prefill_tokens_added < slot_prefill_budget))) {
                         // get next token to process
                         llama_token cur_tok = input_tokens[slot.prompt.n_tokens()];
                         if (cur_tok == LLAMA_TOKEN_NULL) {
@@ -3473,6 +3517,10 @@ private:
                             /* output    = */ slot.need_embd(),
                             /* is_prompt = */ true);
                         slot.prompt.tokens.push_back(cur_tok);
+                        if (limit_prefill) {
+                            prefill_tokens_added++;
+                            slot_prefill_tokens_added++;
+                        }
 
                         // break at the last user message, or at user messages at least min step past the last checkpoint
                         if (do_checkpoint && spans.is_user_start(slot.prompt.n_tokens())) {
@@ -3504,6 +3552,10 @@ private:
                                 break;
                             }
                         }
+                    }
+
+                    if (limit_prefill) {
+                        prompt_slots_remaining = std::max(0, prompt_slots_remaining - 1);
                     }
 
                     // the number of tokens added to the batch for the current slot
