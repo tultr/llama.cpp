@@ -2564,6 +2564,16 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_CONT_BATCHING"));
     add_opt(common_arg(
+        {"--prefill-chunk-size"}, "N",
+        string_format("max prompt tokens to schedule per server update while text generation is active (0 = disabled, default: %d)", params.prefill_chunk_size),
+        [](common_params & params, int value) {
+            if (value < 0) {
+                throw std::invalid_argument("prefill chunk size must be >= 0");
+            }
+            params.prefill_chunk_size = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_PREFILL_CHUNK_SIZE"));
+    add_opt(common_arg(
         {"-mm", "--mmproj"}, "FILE",
         "path to a multimodal projector file. see tools/mtmd/README.md\n"
         "note: if -hf is used, this argument can be omitted",

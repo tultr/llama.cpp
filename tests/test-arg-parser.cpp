@@ -172,6 +172,10 @@ static void test(void) {
     argv = {"binary_name", "-lm", "hello"};
     assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
 
+    // server-only chunked-prefill option rejects negative values
+    argv = {"binary_name", "--prefill-chunk-size", "-1"};
+    assert(false == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_SERVER));
+
     printf("test-arg-parser: test valid usage\n\n");
 
     argv = {"binary_name", "-m", "model_file.gguf"};
@@ -212,6 +216,19 @@ static void test(void) {
     argv = {"binary_name", "-lm", "mmap+mlock"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
     assert(params.load_mode == LLAMA_LOAD_MODE_MMAP_MLOCK);
+
+    {
+        common_params server_params;
+        assert(server_params.prefill_chunk_size == 128);
+
+        argv = {"binary_name", "--prefill-chunk-size", "256"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
+        assert(server_params.prefill_chunk_size == 256);
+
+        argv = {"binary_name", "--prefill-chunk-size", "0"};
+        assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), server_params, LLAMA_EXAMPLE_SERVER));
+        assert(server_params.prefill_chunk_size == 0);
+    }
 
     argv = {"binary_name", "-lm", "dio"};
     assert(true == common_params_parse(argv.size(), list_str_to_char(argv).data(), params, LLAMA_EXAMPLE_COMMON));
